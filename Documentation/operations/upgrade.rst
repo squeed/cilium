@@ -372,6 +372,9 @@ Removed Options
   in version 1.13.
 * The ``host-reachable-services-protos`` option (``.hostServices.protocols`` in
   Helm) was deprecated, and it will be removed in version 1.13.
+* The ``enable-host-reachable-services`` option (``.hostServices`` in Helm) was
+  renamed to ``enable-socket-lb`` (``.socketLB`` in Helm), and will be removed
+  in version 1.13.
 * The ``native-routing-cidr`` option deprecated in 1.11 in favor of
   ``ipv4-native-routing-cidr`` has been removed.
 * The ``prefilter-device`` and ``prefilter-mode`` options deprecated in 1.11 in
