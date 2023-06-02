@@ -168,18 +168,30 @@ func (e *Endpoint) setNextPolicyRevision(revision uint64) {
 //
 // Returns:
 //   - err: any error in obtaining information for computing policy, or if
-//
-// policy could not be generated given the current set of rules in the
-// repository.
-// Must be called with endpoint mutex held.
+//     policy could not be generated given the current set of rules in
+//     the repository.
 func (e *Endpoint) regeneratePolicy() (retErr error) {
 	var forceRegeneration bool
+
+	// lock the endpoint, read our values, then unlock
+	if err := e.rlockAlive(); err != nil {
+		return err
+	}
 
 	// No point in calculating policy if endpoint does not have an identity yet.
 	if e.SecurityIdentity == nil {
 		e.getLogger().Warn("Endpoint lacks identity, skipping policy calculation")
+		e.runlock()
 		return nil
 	}
+
+	// Copy out some values we care about, then unlock
+	forcePolicyCompute := e.forcePolicyCompute
+	nextPolicyRevision := e.nextPolicyRevision
+	policyRevision := e.policyRevision
+	selectorPolicy := e.selectorPolicy
+	securityIdentity := e.SecurityIdentity
+	e.runlock()
 
 	e.getLogger().Debug("Starting policy recalculation...")
 	stats := &policyRegenerationStatistics{}
@@ -188,47 +200,66 @@ func (e *Endpoint) regeneratePolicy() (retErr error) {
 	stats.waitingForPolicyRepository.Start()
 	repo := e.policyGetter.GetPolicyRepository()
 	repo.Mutex.RLock()
-	revision := repo.GetRevision()
-	defer repo.Mutex.RUnlock()
+	repoRevision := repo.GetRevision()
 	stats.waitingForPolicyRepository.End(true)
 
 	// Recompute policy for this endpoint only if not already done for this revision.
-	if !e.forcePolicyCompute && e.nextPolicyRevision >= revision {
+	if !forcePolicyCompute && nextPolicyRevision >= repoRevision {
 		e.getLogger().WithFields(logrus.Fields{
-			"policyRevision.next": e.nextPolicyRevision,
-			"policyRevision.repo": revision,
-			"policyChanged":       e.nextPolicyRevision > e.policyRevision,
+			"policyRevision.next": nextPolicyRevision,
+			"policyRevision.repo": repoRevision,
+			"policyChanged":       nextPolicyRevision > policyRevision,
 		}).Debug("Skipping unnecessary endpoint policy recalculation")
-
+		repo.Mutex.RUnlock()
 		return nil
 	}
 
 	stats.policyCalculation.Start()
-	if e.selectorPolicy == nil {
+	if selectorPolicy == nil {
 		// Upon initial insertion or restore, there's currently no good
 		// trigger point to ensure that the security Identity is
 		// assigned after the endpoint is added to the endpointmanager
 		// (and hence also the identitymanager). In that case, detect
 		// that the selectorPolicy is not set and find it.
-		e.selectorPolicy = repo.GetPolicyCache().Lookup(e.SecurityIdentity)
-		if e.selectorPolicy == nil {
+		selectorPolicy = repo.GetPolicyCache().Lookup(securityIdentity)
+		if selectorPolicy == nil {
 			err := fmt.Errorf("no cached selectorPolicy found")
 			e.getLogger().WithError(err).Warning("Failed to regenerate from cached policy")
+			repo.Mutex.RUnlock()
 			return err
 		}
 	}
-	// TODO: GH-7515: This should be triggered closer to policy change
-	// handlers, but for now let's just update it here.
-	if err := repo.GetPolicyCache().UpdatePolicy(e.SecurityIdentity); err != nil {
+
+	// UpdatePolicy ensures the SelectorPolicy is fully resolved.
+	// Endpoint lock must not be held!
+	if err := repo.GetPolicyCache().UpdatePolicy(securityIdentity); err != nil {
 		e.getLogger().WithError(err).Warning("Failed to update policy")
+		repo.Mutex.RUnlock()
 		return err
 	}
-	calculatedPolicy := e.selectorPolicy.Consume(e)
+	// Consume converts a SelectorPolicy in to an EndpointPolicy
+	desiredPolicy := selectorPolicy.Consume(e)
 
+	repo.Mutex.RUnlock()
 	stats.policyCalculation.End(true)
 
-	// This marks the e.desiredPolicy different from the previously realized policy
-	e.desiredPolicy = calculatedPolicy
+	// We're done allocating, time to re-lock and commit
+	if err := e.lockAlive(); err != nil {
+		return err
+	}
+	defer e.unlock()
+
+	// Check to see that someone else didn't beat us to policy compilation.
+	// if so, then don't commit
+	if e.nextPolicyRevision > repoRevision ||
+		(!forcePolicyCompute && e.nextPolicyRevision == repoRevision) {
+		e.getLogger().WithFields(logrus.Fields{
+			"policyRevision.next":  repoRevision,
+			"policyRevision.ep":    e.nextPolicyRevision,
+			"forcePolicyRecompute": forcePolicyCompute,
+		}).Info("Discarding regeneratePolicy(): endpoint updated!")
+		return nil
+	}
 
 	if e.forcePolicyCompute {
 		forceRegeneration = true     // Options were changed by the caller.
@@ -238,7 +269,9 @@ func (e *Endpoint) regeneratePolicy() (retErr error) {
 
 	// Set the revision of this endpoint to the current revision of the policy
 	// repository.
-	e.setNextPolicyRevision(revision)
+	e.setNextPolicyRevision(repoRevision)
+	e.selectorPolicy = selectorPolicy
+	e.desiredPolicy = desiredPolicy
 
 	e.updatePolicyRegenerationStatistics(stats, forceRegeneration, retErr)
 
