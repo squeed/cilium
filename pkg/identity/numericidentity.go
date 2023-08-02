@@ -564,5 +564,10 @@ func iterateReservedIdentityLabels(f func(_ NumericIdentity, _ labels.Labels)) {
 
 // HasLocalCIDRScope returns true if the identity is in the Local CIDR scope
 func (id NumericIdentity) HasLocalCIDRScope() bool {
-	return (id & IdentityScopeMask) == IdentityScopeLocalCIDR
+	return id.HasScope(IdentityScopeLocalCIDR)
+}
+
+// HasScope returns true if the given identities are in the same scope.
+func (id NumericIdentity) HasScope(scope NumericIdentity) bool {
+	return id&IdentityScopeMask == scope&IdentityScopeMask
 }
