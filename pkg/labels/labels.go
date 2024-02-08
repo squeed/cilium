@@ -577,6 +577,15 @@ func (l Labels) IsReserved() bool {
 	return false
 }
 
+func (l Labels) HasSource(source string) bool {
+	for _, lbl := range l {
+		if lbl.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
 // Has returns true if l contains the given label.
 func (l Labels) Has(label Label) bool {
 	for _, lbl := range l {

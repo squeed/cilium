@@ -182,25 +182,43 @@ func (f *fqdnSelector) setSelectorIPs(ips []netip.Addr) {
 // that is in wantLabels.
 // This is reasonably efficient, as it relies on both arrays being sorted.
 func (f *fqdnSelector) matches(identity scIdentity) bool {
-	wantIdx := 0
-	checkIdx := 0
+	/*
+		wantIdx := 0
+		checkIdx := 0
 
-	// Both arrays are sorted; walk through until we get a match
-	for wantIdx < len(f.wantLabels) && checkIdx < len(identity.lbls) {
-		want := f.wantLabels[wantIdx]
-		check := identity.lbls[checkIdx]
-		if want == check {
+		// Both arrays are sorted; walk through until we get a match
+		for wantIdx < len(f.wantLabels) && checkIdx < len(identity.lbls) {
+			want := f.wantLabels[wantIdx]
+			check := identity.lbls[checkIdx]
+			if want == check {
+				return true
+			}
+
+			// Not equal, bump
+			if check.Key < want.Key {
+				checkIdx++
+			} else {
+				wantIdx++
+			}
+		}
+
+		return false
+	*/
+	w := f.selector.MatchName
+	if len(w) == 0 {
+		w = f.selector.MatchPattern
+	}
+	for _, lbl := range identity.lbls {
+		if lbl.Source > "dns" {
+			break
+		}
+		if lbl.Source != "dns" {
+			continue
+		}
+		if lbl.Key == w {
 			return true
 		}
-
-		// Not equal, bump
-		if check.Key < want.Key {
-			checkIdx++
-		} else {
-			wantIdx++
-		}
 	}
-
 	return false
 }
 

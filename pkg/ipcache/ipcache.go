@@ -566,8 +566,9 @@ func (ipc *IPCache) RemovePrefixes(prefixes []netip.Prefix, src source.Source, r
 // that must occur to associate the specified labels with the prefix, and push
 // any datapath updates necessary to implement the logic associated with the
 // metadata currently associated with the 'prefix'.
-func (ipc *IPCache) UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID) {
-	ipc.UpsertMetadata(prefix, src, resource, lbls)
+func (ipc *IPCache) UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID) uint64 {
+
+	return ipc.UpsertMetadataBatch(MU{Prefix: prefix, Source: src, Resource: resource, Metadata: []IPMetadata{lbls}})
 }
 
 func (ipc *IPCache) RemoveLabels(cidr netip.Prefix, lbls labels.Labels, resource ipcacheTypes.ResourceID) {

@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/ip"
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
@@ -171,20 +172,63 @@ func (n *NameManager) UpdateGenerateDNS(ctx context.Context, lookupTime time.Tim
 	n.RWMutex.Lock()
 	defer n.RWMutex.Unlock()
 
-	// Update IPs in n
-	fqdnSelectorsToUpdate, updatedDNSNames, ipcacheRevision := n.updateDNSIPs(lookupTime, updatedDNSIPs)
-	for dnsName, IPs := range updatedDNSNames {
-		log.WithFields(logrus.Fields{
-			"matchName":             dnsName,
-			"IPs":                   IPs,
-			"fqdnSelectorsToUpdate": fqdnSelectorsToUpdate,
-		}).Debug("Updated FQDN with new IPs")
+	var rev uint64
+
+	for name, rr := range updatedDNSIPs {
+		lbls := labels.Labels{}
+
+		for fqdnSel, fqdnRegex := range n.allSelectors {
+			if fqdnRegex.MatchString(name) {
+				k := fqdnSel.MatchName
+				if len(k) == 0 {
+					k = fqdnSel.MatchPattern
+				}
+				l := labels.Label{
+					Key:    k,
+					Source: "dns",
+				}
+				lbls[l.Key] = l
+			}
+		}
+
+		for _, ip := range rr.IPs {
+			nip, ok := netip.AddrFromSlice(ip)
+			if !ok {
+				continue
+			}
+			rev = n.config.IPCache.UpsertLabels(
+				netip.PrefixFrom(nip, nip.BitLen()),
+				lbls,
+				source.Generated,
+				ipcacheResource,
+			)
+		}
 	}
 
-	selectorIPMapping := n.mapSelectorsToIPsLocked(fqdnSelectorsToUpdate)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		n.config.IPCache.WaitForRevision(rev)
+		wg.Done()
+	}()
+	return wg
 
-	// Update SelectorCache selectors and push changes down in to BPF.
-	return n.config.UpdateSelectors(ctx, selectorIPMapping, ipcacheRevision)
+	/*
+
+		// Update IPs in n
+		fqdnSelectorsToUpdate, updatedDNSNames, ipcacheRevision := n.updateDNSIPs(lookupTime, updatedDNSIPs)
+		for dnsName, IPs := range updatedDNSNames {
+			log.WithFields(logrus.Fields{
+				"matchName":             dnsName,
+				"IPs":                   IPs,
+				"fqdnSelectorsToUpdate": fqdnSelectorsToUpdate,
+			}).Debug("Updated FQDN with new IPs")
+		}
+
+		selectorIPMapping := n.mapSelectorsToIPsLocked(fqdnSelectorsToUpdate)
+
+		// Update SelectorCache selectors and push changes down in to BPF.
+		return n.config.UpdateSelectors(ctx, selectorIPMapping, ipcacheRevision)*/
 }
 
 // ForceGenerateDNS unconditionally regenerates all rules that refer to DNS

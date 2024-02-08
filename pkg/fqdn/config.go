@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	ipcacheTypes "github.com/cilium/cilium/pkg/ipcache/types"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/source"
 )
@@ -41,6 +42,8 @@ type EndpointDNSInfo struct {
 }
 
 type IPCache interface {
+	UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID) uint64
 	UpsertPrefixes(prefixes []netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID) uint64
 	RemovePrefixes(prefixes []netip.Prefix, src source.Source, resource ipcacheTypes.ResourceID)
+	WaitForRevision(desired uint64)
 }

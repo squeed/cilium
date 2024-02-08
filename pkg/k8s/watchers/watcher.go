@@ -186,7 +186,7 @@ type ipcacheManager interface {
 	LookupByIP(IP string) (ipcache.Identity, bool)
 	Delete(IP string, source source.Source) (namedPortsChanged bool)
 
-	UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID)
+	UpsertLabels(prefix netip.Prefix, lbls labels.Labels, src source.Source, resource ipcacheTypes.ResourceID) uint64
 	RemoveLabelsExcluded(lbls labels.Labels, toExclude map[netip.Prefix]struct{}, resource ipcacheTypes.ResourceID)
 	DeleteOnMetadataMatch(IP string, source source.Source, namespace, name string) (namedPortsChanged bool)
 }

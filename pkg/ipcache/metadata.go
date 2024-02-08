@@ -565,10 +565,13 @@ func (ipc *IPCache) resolveIdentity(ctx context.Context, prefix netip.Prefix, in
 	// correspond to remote nodes.
 	if !lbls.Has(labels.LabelRemoteNode[labels.IDNameRemoteNode]) &&
 		!lbls.Has(labels.LabelHealth[labels.IDNameHealth]) &&
-		!lbls.Has(labels.LabelIngress[labels.IDNameIngress]) {
+		!lbls.Has(labels.LabelIngress[labels.IDNameIngress]) &&
+		!lbls.HasSource("dns") { // XXX: don't automatically merge, ever
 		cidrLabels := labels.GetCIDRLabels(prefix)
 		lbls.MergeLabels(cidrLabels)
 	}
+
+	// XXX DNS-only also need world
 
 	// This should only ever allocate an identity locally on the node,
 	// which could theoretically fail if we ever allocate a very large
