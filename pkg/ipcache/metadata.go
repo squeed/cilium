@@ -217,9 +217,11 @@ func (m *metadata) upsertLocked(prefix netip.Prefix, src source.Source, resource
 	for _, i := range info {
 		c := m.m[prefix][resource].merge(i, src)
 		changed = changed || c
-	}
 
-	m.m[prefix].logConflicts(log.WithField(logfields.CIDR, prefix))
+		if m.m[prefix][resource].shouldLogConflicts() {
+			m.m[prefix].logConflicts(log.WithField(logfields.CIDR, prefix))
+		}
+	}
 
 	if !changed {
 		return nil
