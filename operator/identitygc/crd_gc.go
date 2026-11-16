@@ -33,7 +33,11 @@ func (igc *GC) startCRDModeGC(ctx context.Context) error {
 
 	// Don't run GC if CEP is disabled and CEP CRD is not present
 	if option.Config.DisableCiliumEndpointCRD {
-		if !endpointgc.CheckForCiliumEndpointCRD(ctx, igc.k8sClient, igc.logger) {
+		crdExists, err := endpointgc.CheckForCiliumEndpointCRD(ctx, igc.k8sClient, igc.logger)
+		if err != nil {
+			return err
+		}
+		if !crdExists {
 			igc.logger.DebugContext(ctx, "CRD identity garbage collector disabled as CiliumEndpoint CRD is not present")
 			return nil
 		}

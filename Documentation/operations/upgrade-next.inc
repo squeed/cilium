@@ -125,6 +125,8 @@ differently than in prior releases:
   Kubernetes ``ClusterNetworkPolicy`` CRD, which previously had to be installed
   manually, is now installed by the Cilium Operator. See
   :ref:`ClusterNetworkPolicy` for details.
+* ``cilium-endpoint-gc-interval`` when set to 0 used to delete all CiliumEndpoints.
+  This behavior now disables CiliumEndpoint garbage collection.
 
 Deprecated Options
 ##################

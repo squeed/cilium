@@ -41,7 +41,7 @@ var defaultConfig = Config{
 
 // Flags registers the flags for Config.
 func (def Config) Flags(flags *pflag.FlagSet) {
-	flags.Duration("cilium-endpoint-gc-interval", def.CiliumEndpointGCInterval, "GC interval for cilium endpoints")
+	flags.Duration("cilium-endpoint-gc-interval", def.CiliumEndpointGCInterval, "GC interval for cilium endpoints. Set to 0 to disable endpoint GC")
 }
 
 // SharedConfig contains the configuration that is shared between
