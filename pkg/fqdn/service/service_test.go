@@ -155,7 +155,7 @@ func TestFQDNDataServer(t *testing.T) {
 				cell.Config(DefaultConfig),
 				cell.Provide(
 					func(logger *slog.Logger) endpointmanager.EndpointsLookup {
-						return endpointmanager.New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, endpointmanager.EndpointManagerConfig{})
+						return endpointmanager.New(logger, nil, nil, nil, nil, endpointmanager.EndpointManagerConfig{})
 					},
 
 					func(logger *slog.Logger) *ipcache.IPCache {
@@ -270,7 +270,7 @@ func setupServer(t *testing.T, port int, enableL7Proxy bool, enableStandaloneDNS
 			cell.Config(DefaultConfig),
 			cell.Provide(
 				func(logger *slog.Logger) endpointmanager.EndpointsLookup {
-					baseEM := endpointmanager.New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, endpointmanager.EndpointManagerConfig{})
+					baseEM := endpointmanager.New(logger, nil, nil, nil, nil, endpointmanager.EndpointManagerConfig{})
 					return &mockEndpointManager{EndpointManager: baseEM}
 				},
 

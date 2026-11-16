@@ -311,7 +311,7 @@ func TestUpdatePolicyMapsResolvesDeferredNetworkPolicyCallbacks(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := hivetest.Logger(t)
-			mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+			mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 			repo, idmgr, fetcher := newUpdatePolicyMapsTestRepo(t, true)
 			proxy := newRecordingEndpointProxy()
 
@@ -356,7 +356,7 @@ func TestUpdatePolicyMapsResolvesDeferredNetworkPolicyCallbacks(t *testing.T) {
 
 func TestUpdatePolicyMapsDoesNotDeferCallbacksForSynchronousApplyFailure(t *testing.T) {
 	logger := hivetest.Logger(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	repo, idmgr, fetcher := newUpdatePolicyMapsTestRepo(t, true)
 	proxy := newRecordingEndpointProxy()
 
@@ -399,7 +399,7 @@ func TestIncrementalProxyPolicyUpdateNoL7Rule(t *testing.T) {
 
 	t.Run("EnvoyConfigDisabled", func(t *testing.T) {
 		setEnvoyConfigOption(t, false)
-		mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+		mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 		proxy := newRecordingEndpointProxy()
 
 		_ = newUpdatePolicyMapsTestEndpoint(t, mgr, repo, idmgr, fetcher, proxy, 401, netip.MustParseAddr("10.0.3.1"))
@@ -414,7 +414,7 @@ func TestIncrementalProxyPolicyUpdateNoL7Rule(t *testing.T) {
 
 	t.Run("EnvoyConfigEnabled", func(t *testing.T) {
 		setEnvoyConfigOption(t, true)
-		mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+		mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 		proxy := newRecordingEndpointProxy()
 
 		ep := newUpdatePolicyMapsTestEndpoint(t, mgr, repo, idmgr, fetcher, proxy, 402, netip.MustParseAddr("10.0.3.2"))

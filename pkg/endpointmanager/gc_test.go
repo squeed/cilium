@@ -42,7 +42,7 @@ func TestMarkAndSweep(t *testing.T) {
 	logger := hivetest.Logger(t)
 	s := setupEndpointManagerSuite(t)
 	// Open-code WithPeriodicGC() to avoid running the controller
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	mgr.checkHealth = fakeCheck
 	mgr.deleteEndpoint = endpointDeleteFunc(mgr.waitEndpointRemoved)
 
@@ -85,7 +85,7 @@ func TestMarkAndSweep(t *testing.T) {
 func TestMarkAndSweepNoDoubleSweep(t *testing.T) {
 	logger := hivetest.Logger(t)
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	mgr.checkHealth = fakeCheck
 	mgr.deleteEndpoint = endpointDeleteFunc(mgr.waitEndpointRemoved)
 
@@ -161,7 +161,7 @@ func TestMarkAndSweepNoDoubleSweep(t *testing.T) {
 func TestMarkAndSweepEndpointIDRecover(t *testing.T) {
 	logger := hivetest.Logger(t)
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	mgr.checkHealth = fakeCheck
 	mgr.deleteEndpoint = endpointDeleteFunc(mgr.waitEndpointRemoved)
 
@@ -211,7 +211,7 @@ func TestMarkAndSweepEndpointIDRecover(t *testing.T) {
 func TestMarkAndSweepPreservesReplacementReferences(t *testing.T) {
 	logger := hivetest.Logger(t)
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	mgr.checkHealth = fakeCheck
 	mgr.deleteEndpoint = endpointDeleteFunc(mgr.waitEndpointRemoved)
 

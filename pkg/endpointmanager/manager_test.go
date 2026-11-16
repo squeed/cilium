@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,14 +100,6 @@ type DummyRuleCacheOwner struct{}
 
 func (d *DummyRuleCacheOwner) ClearPolicyConsumers(id uint16) *sync.WaitGroup {
 	return &sync.WaitGroup{}
-}
-
-type dummyEpSyncher struct{}
-
-func (epSync *dummyEpSyncher) RunK8sCiliumEndpointSync(e *endpoint.Endpoint, epMgr EndpointsLookup, hr cell.Health) {
-}
-
-func (epSync *dummyEpSyncher) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
 }
 
 type blockingCompletionOwner string
@@ -383,7 +374,7 @@ func TestLookup(t *testing.T) {
 			var ep *endpoint.Endpoint
 			var err error
 			logger := hivetest.Logger(t)
-			mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+			mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 			if tt.cm != nil {
 				ep, err = endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, tt.cm, nil)
 				require.NoErrorf(t, err, "Test Name: %s", tt.name)
@@ -409,7 +400,7 @@ func TestLookupCiliumID(t *testing.T) {
 	logger := hivetest.Logger(t)
 
 	model := newTestEndpointModel(2, endpoint.StateReady)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 
@@ -484,7 +475,7 @@ func TestLookupCNIAttachmentID(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
 
 	logger := hivetest.Logger(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, &apiv1.EndpointChangeRequest{
 		ContainerID:            "foo",
 		ContainerInterfaceName: "bar",
@@ -506,7 +497,7 @@ func TestLookupIPv4(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
 	logger := hivetest.Logger(t)
 
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	model := newTestEndpointModel(4, endpoint.StateReady)
 	ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
@@ -579,7 +570,7 @@ func TestLookupIPv4(t *testing.T) {
 func TestLookupCEPName(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
 	logger := hivetest.Logger(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	type args struct {
 		podName string
 	}
@@ -705,7 +696,7 @@ func TestUpdateReferences(t *testing.T) {
 		var err error
 		ep, err = endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, &tt.cm, nil)
 		require.NoErrorf(t, err, "Test Name: %s", tt.name)
-		mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+		mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 
 		err = mgr.expose(ep)
 		require.NoErrorf(t, err, "Test Name: %s", tt.name)
@@ -730,7 +721,7 @@ func TestUpdateReferences(t *testing.T) {
 func TestRemove(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
 	logger := hivetest.Logger(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	model := newTestEndpointModel(7, endpoint.StateReady)
 	ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
@@ -776,7 +767,7 @@ func TestRemove(t *testing.T) {
 func TestWaitForEndpointsAtPolicyRev(t *testing.T) {
 	s := setupEndpointManagerSuite(t)
 	logger := hivetest.Logger(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	model := newTestEndpointModel(1, endpoint.StateReady)
 	ep, err := endpoint.NewEndpointFromChangeModel(makeTestEndpointParams(logger, s), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
@@ -909,7 +900,7 @@ func TestMissingNodeLabelsUpdate(t *testing.T) {
 	// Initialize label filter config.
 	labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, "")
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	hostEPID := uint16(17)
 
 	// Initialize the local node watcher before the host endpoint is created.
@@ -954,7 +945,7 @@ func TestUpdateHostEndpointLabels(t *testing.T) {
 	// Initialize label filter config.
 	labelsfilter.ParseLabelPrefixCfg(logger, []string{"k8s:!ignore1", "k8s:!ignore2"}, nil, "")
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 	hostEPID := uint16(17)
 	type args struct {
 		oldLabels, newLabels map[string]string
@@ -1094,7 +1085,7 @@ func TestUpdateHostEndpointLabels(t *testing.T) {
 func TestUpdateCIDRLabelsPrefixScan(t *testing.T) {
 	logger := hivetest.Logger(t)
 	s := setupEndpointManagerSuite(t)
-	mgr := New(logger, nil, &dummyEpSyncher{}, nil, nil, nil, defaultEndpointManagerConfig)
+	mgr := New(logger, nil, nil, nil, nil, defaultEndpointManagerConfig)
 
 	// Create and expose two endpoints, one inside the subnet, one outside
 	model1 := newTestEndpointModel(1, endpoint.StateReady)

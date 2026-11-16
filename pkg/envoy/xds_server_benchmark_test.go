@@ -785,12 +785,6 @@ func newBenchmarkXDSBackend(b *testing.B, logger *slog.Logger, mode envoyconfig.
 	return backend
 }
 
-type benchmarkEndpointSynchronizer struct{}
-
-func (*benchmarkEndpointSynchronizer) RunK8sCiliumEndpointSync(*endpoint.Endpoint, endpointmanager.EndpointsLookup, cell.Health) {
-}
-func (*benchmarkEndpointSynchronizer) DeleteK8sCiliumEndpointSync(*endpoint.Endpoint) {}
-
 // benchmarkEndpointProxy supplies the redirect-management half of
 // endpoint.EndpointProxy, which is not owned by the xDS server. Network policy
 // updates and removals are promoted methods of the selected production server.
@@ -836,7 +830,7 @@ func newIdentityUpdateBenchmark(b *testing.B, mode envoyconfig.XDSMode) *identit
 		logging.DefaultSlogLogger = oldDefaultLogger // slogloggercheck: restore the logger replaced by benchmark setup.
 	})
 
-	manager := endpointmanager.New(logger, nil, &benchmarkEndpointSynchronizer{}, nil, nil, &testmonitor.TestMonitorAgent{}, endpointmanager.EndpointManagerConfig{
+	manager := endpointmanager.New(logger, nil, nil, nil, &testmonitor.TestMonitorAgent{}, endpointmanager.EndpointManagerConfig{
 		EndpointPolicyUpdateTimeout:          5 * time.Minute,
 		BPFPolicyMapPressureMetricsThreshold: 0.1,
 	})

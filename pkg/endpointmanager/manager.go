@@ -114,21 +114,20 @@ type endpointManager struct {
 type endpointDeleteFunc func(*endpoint.Endpoint, endpoint.DeleteConfig) []error
 
 // New creates a new endpointManager.
-func New(logger *slog.Logger, registry *metrics.Registry, epSynchronizer EndpointResourceSynchronizer, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent, config EndpointManagerConfig) *endpointManager {
+func New(logger *slog.Logger, registry *metrics.Registry, lns *node.LocalNodeStore, health cell.Health, monitorAgent monitoragent.Agent, config EndpointManagerConfig) *endpointManager {
 	mgr := endpointManager{
-		logger:                       logger,
-		config:                       config,
-		health:                       health,
-		endpoints:                    make(map[uint16]*endpoint.Endpoint),
-		endpointsAux:                 make(map[string]*endpoint.Endpoint),
-		mcastManager:                 mcastmanager.New(logger, option.Config.IPv6MCastDevice),
-		EndpointResourceSynchronizer: epSynchronizer,
-		subscribers:                  make(map[Subscriber]struct{}),
-		controllers:                  controller.NewManager(),
-		localNodeStore:               lns,
-		epIDAllocator:                newEPIDAllocator(),
-		monitorAgent:                 monitorAgent,
-		policyUpdateCallbackDetails:  newPolicyUpdateCallbackDetails(),
+		logger:                      logger,
+		config:                      config,
+		health:                      health,
+		endpoints:                   make(map[uint16]*endpoint.Endpoint),
+		endpointsAux:                make(map[string]*endpoint.Endpoint),
+		mcastManager:                mcastmanager.New(logger, option.Config.IPv6MCastDevice),
+		subscribers:                 make(map[Subscriber]struct{}),
+		controllers:                 controller.NewManager(),
+		localNodeStore:              lns,
+		epIDAllocator:               newEPIDAllocator(),
+		monitorAgent:                monitorAgent,
+		policyUpdateCallbackDetails: newPolicyUpdateCallbackDetails(),
 	}
 	mgr.deleteEndpoint = mgr.removeEndpoint
 	mgr.policyMapPressure = newPolicyMapPressure(logger, registry, config.BPFPolicyMapPressureMetricsThreshold)

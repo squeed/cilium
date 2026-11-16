@@ -244,7 +244,7 @@ func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 
 	p.Config.Validate(p.Logger)
 
-	mgr := New(p.Logger, p.MetricsRegistry, p.EPSynchronizer, p.LocalNodeStore, p.Health, p.MonitorAgent, p.Config)
+	mgr := New(p.Logger, p.MetricsRegistry, p.LocalNodeStore, p.Health, p.MonitorAgent, p.Config)
 
 	p.Lifecycle.Append(cell.Hook{
 		OnStop: func(cell.HookContext) error {
