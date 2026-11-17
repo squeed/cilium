@@ -127,8 +127,10 @@ func (e *Endpoint) GetCiliumEndpointUID() types.UID {
 }
 
 // SetCiliumEndpointUID modifies the endpoint's CiliumEndpoint UID.
-func (e *Endpoint) SetCiliumEndpointUID(uid types.UID) {
+func (e *Endpoint) SetCiliumEndpointUID(uid types.UID) bool {
 	e.unconditionalLock()
+	old := e.ciliumEndpointUID
 	e.ciliumEndpointUID = uid
 	e.unlock()
+	return uid != old
 }

@@ -466,7 +466,6 @@ func (r *endpointRestorer) RestoreOldEndpoints() error {
 		if err != nil {
 			// Disconnected EPs are not failures, clean them silently below
 			if !ep.IsDisconnecting() {
-				r.endpointManager.DeleteK8sCiliumEndpointSync(ep)
 				scopedLog.Warn("Unable to restore endpoint, ignoring",
 					logfields.Labels, ep.GetLabels(),
 					logfields.Error, err)

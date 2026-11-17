@@ -21,10 +21,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
-	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/resource"
-	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
 	"github.com/cilium/cilium/pkg/node"
@@ -62,7 +59,7 @@ var defaultGroup = cell.Group(
 	cell.Config(defaultEndpointManagerConfig),
 	cell.Provide(newDefaultEndpointManager),
 	cell.Provide(endpoint.NewEndpointBuildQueue),
-	cell.ProvidePrivate(newEndpointSynchronizer),
+	cell.Invoke(newEndpointSynchronizer),
 )
 
 type EndpointsLookup interface {
@@ -141,7 +138,6 @@ type EndpointsModify interface {
 type EndpointManager interface {
 	EndpointsLookup
 	EndpointsModify
-	EndpointResourceSynchronizer
 
 	// Subscribe to endpoint events.
 	Subscribe(s Subscriber)
@@ -199,13 +195,6 @@ type EndpointManager interface {
 	UpdateCIDRLabels(ctx context.Context, prefix netip.Prefix) bool
 }
 
-// EndpointResourceSynchronizer is an interface which synchronizes CiliumEndpoint
-// resources with Kubernetes.
-type EndpointResourceSynchronizer interface {
-	RunK8sCiliumEndpointSync(ep *endpoint.Endpoint, epMgr EndpointsLookup, hr cell.Health)
-	DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint)
-}
-
 var (
 	_ EndpointsLookup = &endpointManager{}
 	_ EndpointsModify = &endpointManager{}
@@ -223,7 +212,6 @@ type endpointManagerParams struct {
 	Clientset       client.Clientset
 	MetricsRegistry *metrics.Registry
 	Health          cell.Health
-	EPSynchronizer  EndpointResourceSynchronizer
 	LocalNodeStore  *node.LocalNodeStore
 	MonitorAgent    monitoragent.Agent
 
@@ -295,23 +283,5 @@ func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 		Modify:   mgr,
 		Manager:  mgr,
 		Callback: mgr,
-	}
-}
-
-type endpointSynchronizerParams struct {
-	cell.In
-
-	Clientset           client.Clientset
-	CiliumEndpoint      resource.Resource[*types.CiliumEndpoint]
-	CiliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
-	LocalNodeStore      *node.LocalNodeStore
-}
-
-func newEndpointSynchronizer(p endpointSynchronizerParams) EndpointResourceSynchronizer {
-	return &EndpointSynchronizer{
-		Clientset:           p.Clientset,
-		CiliumEndpoint:      p.CiliumEndpoint,
-		CiliumEndpointSlice: p.CiliumEndpointSlice,
-		localNodeStore:      p.LocalNodeStore,
 	}
 }

@@ -10,8 +10,6 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/cilium/hive/cell"
-
 	"github.com/cilium/cilium/api/v1/models"
 	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/pkg/container/set"
@@ -31,10 +29,9 @@ type MockEndpointManager struct {
 }
 
 var (
-	_ endpointmanager.EndpointManager              = (*MockEndpointManager)(nil)
-	_ endpointmanager.EndpointsLookup              = (*MockEndpointManager)(nil)
-	_ endpointmanager.EndpointsModify              = (*MockEndpointManager)(nil)
-	_ endpointmanager.EndpointResourceSynchronizer = (*MockEndpointManager)(nil)
+	_ endpointmanager.EndpointManager = (*MockEndpointManager)(nil)
+	_ endpointmanager.EndpointsLookup = (*MockEndpointManager)(nil)
+	_ endpointmanager.EndpointsModify = (*MockEndpointManager)(nil)
 )
 
 // NewMockEndpointManager returns a MockEndpointManager with no endpoints and
@@ -139,16 +136,6 @@ func (*MockEndpointManager) UpdateReferences(ep *endpoint.Endpoint) error {
 
 func (*MockEndpointManager) RemoveEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error {
 	panic("MockEndpointManager.RemoveEndpoint not implemented")
-}
-
-// EndpointResourceSynchronizer
-
-func (*MockEndpointManager) RunK8sCiliumEndpointSync(ep *endpoint.Endpoint, epMgr endpointmanager.EndpointsLookup, hr cell.Health) {
-	panic("MockEndpointManager.RunK8sCiliumEndpointSync not implemented")
-}
-
-func (*MockEndpointManager) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
-	panic("MockEndpointManager.DeleteK8sCiliumEndpointSync not implemented")
 }
 
 // EndpointManager

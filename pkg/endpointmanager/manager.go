@@ -69,10 +69,6 @@ type endpointManager struct {
 	// pod's IPv6 address is discoverable.
 	mcastManager *mcastmanager.MCastManager
 
-	// EndpointSynchronizer updates external resources (e.g., Kubernetes) with
-	// up-to-date information about endpoints managed by the endpoint manager.
-	EndpointResourceSynchronizer
-
 	// subscribers are notified when events occur in the endpointManager.
 	subscribers map[Subscriber]struct{}
 
@@ -693,7 +689,6 @@ func (mgr *endpointManager) expose(ep *endpoint.Endpoint) error {
 	mgr.mutex.Unlock()
 
 	ep.InitEndpointHealth(mgr.health)
-	mgr.EndpointResourceSynchronizer.RunK8sCiliumEndpointSync(ep, mgr, ep.GetReporter("cep-k8s-sync"))
 
 	return nil
 }

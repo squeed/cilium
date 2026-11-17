@@ -120,7 +120,7 @@ func Test_updateCEPUID(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ln := node.LocalNode{}
 			ln.SetNodeInternalIP(netip.MustParseAddr(test.nodeIP))
-			eps := &EndpointSynchronizer{
+			eps := &endpointSynchronizer{
 				localNodeStore: node.NewTestLocalNodeStore(ln),
 			}
 			err := eps.updateCEPUID(t.Context(), logger, test.ep, test.cep)

@@ -6,12 +6,12 @@ package endpointmanager
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/blang/semver/v4"
 	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/job"
+	"github.com/cilium/stream"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -22,596 +22,410 @@ import (
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	v2 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sTypes "github.com/cilium/cilium/pkg/k8s/types"
-	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
-	pkgLabels "github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
-	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/time"
 )
 
 const (
 	// subsysEndpointSync is the value for logfields.LogSubsys
-	subsysEndpointSync = "endpointsynchronizer"
+	subsysEndpointSync      = "endpointsynchronizer"
+	informerSyncGracePeriod = 10 * time.Second
 )
 
 var ciliumEndpointToK8sSyncControllerGroup = controller.NewGroup("sync-to-k8s-ciliumendpoint")
 
-// EndpointSynchronizer currently is an empty type, which wraps around syncing
+type endpointSynchronizerParams struct {
+	cell.In
+
+	JG                  job.Group
+	Clientset           client.Clientset
+	CiliumEndpoint      resource.Resource[*k8sTypes.CiliumEndpoint]
+	CiliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
+	LocalNodeStore      *node.LocalNodeStore
+	EndpointManager     EndpointManager
+}
+
+func newEndpointSynchronizer(p endpointSynchronizerParams) *endpointSynchronizer {
+	if !p.Clientset.IsEnabled() || option.Config.DisableCiliumEndpointCRD {
+		return nil
+	}
+
+	epSync := &endpointSynchronizer{
+		Clientset:           p.Clientset,
+		CiliumEndpoint:      p.CiliumEndpoint,
+		CiliumEndpointSlice: p.CiliumEndpointSlice,
+		localNodeStore:      p.LocalNodeStore,
+		EM:                  p.EndpointManager,
+
+		q: make(chan *endpoint.Endpoint, 512),
+	}
+
+	if p.JG != nil {
+		obs := stream.FromChannel(epSync.q)
+		p.JG.Add(job.Observer("sync-to-k8s-ciliumendpoint", epSync.observeEPs, obs))
+		p.JG.Add(job.Timer("periodic-k8s-ciliumendpoint-sync", epSync.periodicResync, informerSyncGracePeriod))
+	}
+
+	if p.EndpointManager != nil {
+		p.EndpointManager.Subscribe(epSync)
+	}
+
+	return epSync
+}
+
+// endpointSynchronizer currently is an empty type, which wraps around syncing
 // of CiliumEndpoint resources.
-type EndpointSynchronizer struct {
+type endpointSynchronizer struct {
 	Clientset           client.Clientset
 	CiliumEndpoint      resource.Resource[*k8sTypes.CiliumEndpoint]
 	CiliumEndpointSlice resource.Resource[*cilium_v2a1.CiliumEndpointSlice]
 	localNodeStore      *node.LocalNodeStore
+	EM                  EndpointManager
+
+	nodeName string
+
+	// Queue of endpoints to update.
+	q chan (*endpoint.Endpoint)
+
+	epStore resource.Store[*k8sTypes.CiliumEndpoint]
 }
 
-// RunK8sCiliumEndpointSync starts a controller that synchronizes the endpoint
-// to the corresponding k8s CiliumEndpoint CRD. It is expected that each CEP
-// has 1 controller that updates it, and a local copy is retained and only
-// updates are pushed up.
-// CiliumEndpoint objects have the same name as the pod they represent.
-// epMgr is used to check whether the endpoint still owns its CEP name.
-func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoint, epMgr EndpointsLookup, h cell.Health) {
-	var (
-		endpointID     = e.ID
-		controllerName = endpoint.EndpointSyncControllerName(endpointID)
-		scopedLog      = e.Logger(subsysEndpointSync).With(
-			logfields.Controller, controllerName,
-		)
-	)
-
-	if option.Config.DisableCiliumEndpointCRD {
-		h.Stopped("ciliumendpoint CRD disabled")
-		scopedLog.Debug("Not running controller. CEP CRD synchronization is disabled")
-		return
-	}
-
-	if !epSync.Clientset.IsEnabled() {
-		h.Stopped("k8s client-set disabled")
-		scopedLog.Debug("Not starting controller because k8s is disabled")
-		return
-	}
-
-	ciliumClient := epSync.Clientset.CiliumV2()
-
-	// The health endpoint doesn't really exist in k8s and updates to it caused
-	// arbitrary errors. Disable the controller for these endpoints.
-	if isHealthEP := e.HasLabels(pkgLabels.LabelHealth); isHealthEP {
-		h.Stopped("Cilium health endpoint has no CEP object for k8s sync")
-		scopedLog.Debug("Not starting unnecessary CEP controller for cilium-health endpoint")
-		return
-	}
-
-	// The CEP name is derived from the K8sPodName and K8sNamespace.
-	// They should always be available if an endpoint belongs to a pod.
-	cepName := e.GetK8sCEPName()
-	if cepName == "" {
-		h.Stopped("Endpoint synchronizer stopped due to missing CEP metadata")
-		scopedLog.Debug("Skipping CiliumEndpoint update because it has no k8s cep name")
-		return
-	}
-
-	var (
-		lastMdl          *cilium_v2.EndpointStatus
-		localCEP         *cilium_v2.CiliumEndpoint // the local copy of the CEP object. Reused.
-		needInit         = true                    // needInit indicates that we may need to create the CEP
-		firstTry         = true                    // Try to get CEP from k8s cache
-		lastSuccessfulOp time.Time                 // Time of last successful CEP create/update
-	)
-
-	const (
-		informerSyncGracePeriod = 10 * time.Second
-	)
-
-	// NOTE: The controller functions do NOT hold the endpoint locks
-	e.UpdateController(controllerName,
-		controller.ControllerParams{
-			Group:       ciliumEndpointToK8sSyncControllerGroup,
-			RunInterval: informerSyncGracePeriod,
-			Health:      h,
-			DoFunc: func(ctx context.Context) (err error) {
-				if epMgr.LookupCEPName(e.GetK8sNamespaceAndCEPName()) != e {
-					return controller.NewExitReason("Endpoint no longer owns the CEP name")
-				}
-
-				// Update logger as scopeLog might not have the podName when it
-				// was created.
-				scopedLog = e.Logger(subsysEndpointSync).With(logfields.Controller, controllerName)
-
-				if k8sversion.Version().Equals(semver.Version{}) {
-					return fmt.Errorf("Kubernetes apiserver is not available")
-				}
-
-				ln, err := epSync.localNodeStore.Get(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to get local node: %w", err)
-				}
-
-				cepOwner := e.GetCEPOwner()
-				if cepOwner.IsNil() {
-					scopedLog.Debug("Skipping CiliumEndpoint update because it has no k8s namespace")
-					return nil
-				}
-
-				if !e.HaveK8sMetadata() {
-					scopedLog.Debug("Skipping CiliumEndpoint update because k8s metadata is not yet available")
-					return nil
-				}
-
-				identity, err := e.GetSecurityIdentity()
-				if err != nil {
-					return err
-				}
-				if identity == nil {
-					scopedLog.Debug("Skipping CiliumEndpoint update because security identity is not yet available")
-					return nil
-				}
-
-				// Serialize the endpoint into a model. It is compared with the one
-				// from before, only updating on changes.
-				mdl := e.GetCiliumEndpointStatus()
-				if !needInit && mdl.DeepEqual(lastMdl) {
-					// Even if the status hasn't changed, we should periodically verify
-					// that the CEP still exists. This prevents a false success loop where
-					// an external actor (e.g., another node's cleanup controller during
-					// pod migration) deletes the CEP, but this controller continues to
-					// report success without recreating it.
-					//
-					// We use the local CEP resource store (maintained by the informer)
-					// instead of making an API call, which is more efficient.
-					//
-					// However, we must wait for the informer to sync after we create or
-					// update the CEP. We allow at least one controller run interval (10s)
-					// for the changes to propagate to the local store.
-					// This prevents false positives where we think the CEP was deleted
-					// externally when it's just not yet in the informer cache.
-					if localCEP != nil && time.Since(lastSuccessfulOp) >= informerSyncGracePeriod {
-						cepExists := false
-
-						// Check if CiliumEndpointSlice is enabled
-						if option.Config.EnableCiliumEndpointSlice {
-							// Check in CiliumEndpointSlice store
-							if epSync.CiliumEndpointSlice != nil {
-								cesStore, err := epSync.CiliumEndpointSlice.Store(ctx)
-								if err != nil {
-									scopedLog.Debug("Error getting CES store", logfields.Error, err)
-								} else {
-									nodeIP := node.GetCiliumEndpointNodeIP(ln)
-									// Get all CES objects for this node
-									objs, err := cesStore.ByIndex("localNode", nodeIP)
-									if err != nil {
-										scopedLog.Debug("Error getting indexed CiliumEndpointSlice from store", logfields.Error, err)
-									} else {
-										// Check if our CEP exists in any CES
-										for _, ces := range objs {
-											if ces.Namespace == cepOwner.GetNamespace() {
-												for _, cep := range ces.Endpoints {
-													if cep.Name == cepName && cep.Networking.NodeIP == nodeIP {
-														cepExists = true
-														break
-													}
-												}
-											}
-											if cepExists {
-												break
-											}
-										}
-									}
-								}
-							}
-						} else {
-							// Check in CiliumEndpoint store. The endpoints are already filtered to only contain
-							// local endpoints via the "localNode" indexer, so no node IP check is needed.
-							if epSync.CiliumEndpoint != nil {
-								cepStore, err := epSync.CiliumEndpoint.Store(ctx)
-								if err != nil {
-									scopedLog.Debug("Error getting CEP store", logfields.Error, err)
-								} else {
-									nodeIP := node.GetCiliumEndpointNodeIP(ln)
-									objs, err := cepStore.ByIndex("localNode", nodeIP)
-									if err != nil {
-										scopedLog.Debug("Error getting indexed CiliumEndpoint from store", logfields.Error, err)
-									} else {
-										for _, cep := range objs {
-											if cep.Namespace == cepOwner.GetNamespace() && cep.Name == cepName {
-												cepExists = true
-												break
-											}
-										}
-									}
-								}
-							}
-						}
-
-						if !cepExists && ctx.Err() == nil {
-							scopedLog.Warn("CEP was deleted externally or there is a significant delay on the CEP informer, will recreate on next iteration")
-							needInit = true
-							localCEP = nil
-							return fmt.Errorf("CEP deleted externally or significant informer delay")
-						}
-					}
-					scopedLog.Debug("Skipping CiliumEndpoint update because it has not changed")
-					return nil
-				}
-
-				if needInit {
-					state := e.GetState()
-					// Don't bother to create if the
-					// endpoint is already disconnecting
-					if state == endpoint.StateDisconnecting ||
-						state == endpoint.StateDisconnected {
-						return nil
-					}
-
-					scopedLog.Debug("Getting CEP during an initialization")
-					if firstTry {
-						// First we try getting CEP from the API server cache, as it's cheaper.
-						// If it fails we get it from etcd to be sure to have fresh data.
-						localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Get(ctx, cepName, meta_v1.GetOptions{ResourceVersion: "0"})
-						firstTry = false
-					} else {
-						localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Get(ctx, cepName, meta_v1.GetOptions{})
-					}
-					// It's only an error if it exists but something else happened
-					switch {
-					case err == nil:
-						// Backfill the CEP UID as we need to do if the CEP was
-						// created on an agent version that did not yet store the
-						// UID at CEP create time.
-						if err := epSync.updateCEPUID(ctx, scopedLog, e, localCEP); err != nil {
-							scopedLog.Warn("could not take ownership of existing ciliumendpoint", logfields.Error, err)
-							return err
-						}
-					case k8serrors.IsNotFound(err):
-						// We can't create localCEP directly, it must come from the k8s
-						// server via an API call.
-						cep := &cilium_v2.CiliumEndpoint{
-							ObjectMeta: meta_v1.ObjectMeta{
-								Name: cepName,
-								OwnerReferences: []meta_v1.OwnerReference{
-									{
-										APIVersion: cepOwner.GetAPIVersion(),
-										Kind:       cepOwner.GetKind(),
-										Name:       cepOwner.GetName(),
-										UID:        cepOwner.GetUID(),
-									},
-								},
-								// Mirror the labels of parent pod in CiliumEndpoint object to enable
-								// label based selection for CiliumEndpoints.
-								Labels: cepOwner.GetLabels(),
-							},
-							Status: *mdl,
-						}
-						localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Create(ctx, cep, meta_v1.CreateOptions{})
-						if err != nil {
-							// Suppress logging an error if ep backing the pod was terminated
-							// before CEP could be created and shut down the controller.
-							if errors.Is(err, context.Canceled) {
-								return nil
-							}
-
-							scopedLog.Error("Cannot create CEP", logfields.Error, err)
-							return err
-						}
-
-						scopedLog.Debug("storing CEP UID after create", logfields.CEPUID, localCEP.UID)
-						e.SetCiliumEndpointUID(localCEP.UID)
-
-						// continue the execution so we update the endpoint
-						// status immediately upon endpoint creation
-
-					case errors.Is(err, context.Canceled):
-						// Do not log a warning in case of errors due to the
-						// endpoint being terminated.
-						return nil
-					default:
-						scopedLog.Warn("Error getting CEP", logfields.Error, err)
-						return err
-					}
-
-					// We return earlier for all error cases so we don't need
-					// to init the local endpoint in non-error cases.
-					needInit = false
-					lastMdl = &localCEP.Status
-					lastSuccessfulOp = time.Now()
-					// We still need to update the CEP if localCEP is out of sync with upstream.
-					// We only return if upstream is NOT out-of-sync here.
-					if mdl.DeepEqual(lastMdl) {
-						scopedLog.Debug("Skipping CiliumEndpoint update because it has not changed")
-						return nil
-					}
-				}
-				// We have no localCEP copy. We need to fetch it for updates, below.
-				// This is unexpected as there should be only 1 writer per CEP, this
-				// controller, and the localCEP created on startup will be used.
-				if localCEP == nil {
-					localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Get(ctx, cepName, meta_v1.GetOptions{})
-					switch {
-					case err == nil:
-						// Backfill the CEP UID as we need to do if the CEP was
-						// created on an agent version that did not yet store the
-						// UID at CEP create time.
-						if err := epSync.updateCEPUID(ctx, scopedLog, e, localCEP); err != nil {
-							scopedLog.Warn("could not take ownership of existing ciliumendpoint", logfields.Error, err)
-							return err
-						}
-
-					// The CEP doesn't exist in k8s. This is unexpetected but may occur
-					// if the endpoint was removed from k8s but not yet within the agent.
-					// Mark the CEP for creation on the next controller iteration. This
-					// may never occur if the controller is stopped on Endpoint delete.
-					case k8serrors.IsNotFound(err):
-						needInit = true
-						return err
-
-					// We cannot read the upstream CEP. needInit will cause the next
-					// iteration to delete and create the CEP. This is an unexpected
-					// situation.
-					case k8serrors.IsInvalid(err):
-						scopedLog.Warn("Invalid CEP during update", logfields.Error, err)
-						needInit = true
-						return nil
-
-					// A real error
-					default:
-						scopedLog.Error("Cannot get CEP during update", logfields.Error, err)
-						return err
-					}
-				}
-
-				// Recheck after fetching the CEP: a replacement may have been
-				// registered while the API request was in flight.
-				if epMgr.LookupCEPName(e.GetK8sNamespaceAndCEPName()) != e {
-					return controller.NewExitReason("Endpoint no longer owns the CEP name")
-				}
-
-				// For json patch we don't need to perform a GET for endpoints
-
-				// Apply status only to the CEP version observed by this controller.
-				replaceCEPStatus := []k8s.JSONPatch{
-					// If the stored UID matches the one in the ciliumendpoint then
-					// this first patch is a no-op, otherwise the entire patch will
-					// not be applied as uid is immutable.
-					{
-						OP:    "test",
-						Path:  "/metadata/uid",
-						Value: e.GetCiliumEndpointUID(),
-					},
-					// Use replace so a concurrent update returns a conflict.
-					{
-						OP:    "replace",
-						Path:  "/metadata/resourceVersion",
-						Value: localCEP.ResourceVersion,
-					},
-					{
-						OP:    "replace",
-						Path:  "/status",
-						Value: mdl,
-					},
-				}
-				var createStatusPatch []byte
-				createStatusPatch, err = json.Marshal(replaceCEPStatus)
-				if err != nil {
-					return err
-				}
-
-				localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Patch(
-					ctx, cepName,
-					k8stypes.JSONPatchType,
-					createStatusPatch,
-					meta_v1.PatchOptions{})
-
-				// Handle Update errors or return successfully
-				switch {
-				// Return no error when we see a conflict. We want to retry without a
-				// backoff and the Update* calls returned the current localCEP
-				case err != nil && k8serrors.IsConflict(err):
-					scopedLog.Warn("Cannot update CEP due to a revision conflict. The next controller execution will try again", logfields.Error, err)
-					needInit = true
-					return nil
-
-				// Ensure we re-init when we see a generic error. This will recrate the
-				// CEP.
-				case err != nil:
-					// Suppress logging an error if ep backing the pod was terminated
-					// before CEP could be updated and shut down the controller.
-					if errors.Is(err, context.Canceled) {
-						return nil
-					}
-					scopedLog.Error("Cannot update CEP", logfields.Error, err)
-
-					needInit = true
-					return err
-
-				// A successful update means no more updates unless the endpoint status, aka mdl, changes
-				default:
-					lastMdl = mdl
-					lastSuccessfulOp = time.Now()
-					return nil
-				}
-			},
-			StopFunc: func(ctx context.Context) error {
-				return deleteCEP(ctx, scopedLog, ciliumClient, e)
-			},
-		})
-}
-
-// updateCEPUID attempts to update the endpoints UID to be that of localCEP.
-// This in effect takes ownership of the referenced CEP, thus we can only
-// do this if it is safe to do so. Otherwise an error is returned.
-//
-// One caveat is that, although endpoints are now restored to reference their
-// previous CEP, this has to handle cases where agent was upgraded from a version
-// that did not store CEP UIDs in the restore state header.
-// It is only safe to do so if the CEP is local.
-//
-// In all cases where the endpoint cannot take ownership of a CEP, it is assumed
-// that this is a temporary state where either the local/remote agent managing the CEP
-// is shutting down and will delete the CEP, or the CEP is stale and needs to be cleaned
-// up by the operator.
-func (epSync *EndpointSynchronizer) updateCEPUID(ctx context.Context, scopedLog *slog.Logger, e *endpoint.Endpoint, localCEP *cilium_v2.CiliumEndpoint) error {
-	// It's possible we already own this CEP, as in the case of a restore after restart.
-	// If the Endpoint already owns the CEP (by holding the matching CEP UID reference) then we don't have to
-	// worry about other ownership checks.
-	//
-	// This will cover cases such as if the NodeIP changes (as with a reboot).
-	// In which case we can safely take ownership and overwrite the CEPs
-	// status. However if the cilium endpoints are lost on restart (eg the
-	// state files were previously checkpointed into tmpfs) this check will
-	// fail and we will rely on the next check to prevent us from hijacking
-	// CEPs.
-	cepUID := e.GetCiliumEndpointUID()
-	if cepUID == localCEP.UID {
-		return nil
-	}
-
-	// We do not want to take ownership of CEPs created on other Nodes.
-	// However we can't directly compare the CEP node ip with the node, because
-	// the node ip can change, orphaning the CEP. So we retrieve the pod for
-	// the CEP and compare its node IP with that of the node. The kubelet on
-	// this node will update the pod object appropriately, allowing this check
-	// to eventually go through.
-	//
-	// The intent here is to check if a given pod is running on the same node
-	// this cilium is running on before taking over its CEP.
-	cepOwner := e.GetCEPOwner()
-	if cepOwner.IsNil() {
-		return fmt.Errorf("endpoint sync cannot take ownership of CEP: no pod")
-	}
-	podHostIP := cepOwner.GetHostIP()
-	if podHostIP == "" {
-		return fmt.Errorf("endpoint sync cannot take ownership of CEP: no pod HostIP")
-	}
-
-	ln, err := epSync.localNodeStore.Get(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get local node: %w", err)
-	}
-
-	if nodeIP := ln.GetNodeIP(false).String(); podHostIP != nodeIP {
-		// Also checking node ipv6 for k8s dual stack with ipv6 preference where
-		// podHostIP is gonna be node ipv6
-		if nodeIPV6 := ln.GetNodeIP(true).String(); podHostIP != nodeIPV6 {
-			return fmt.Errorf("endpoint sync cannot take ownership of CEP that is not local: CEP's pod %q, pod's hostIP %q, cilium nodeIP %q)",
-				e.GetK8sPodName(), podHostIP, nodeIP)
+// timer job that periodically enqueues all endpoints to be resynchronized
+func (epSync *endpointSynchronizer) periodicResync(ctx context.Context) error {
+	eps := epSync.EM.GetEndpoints()
+	for _, ep := range eps {
+		select {
+		case epSync.q <- ep:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-	}
-
-	// If the endpoint has a CEP UID, which does not match the current CEP, we cannot take
-	// ownership.
-	if cepUID != "" && cepUID != localCEP.GetUID() {
-		return fmt.Errorf("endpoint sync could not take ownership of CEP %q, endpoint UID (%q) did not match CEP UID: %q",
-			localCEP.GetNamespace()+"/"+localCEP.GetName(), cepUID, localCEP.GetUID())
-	}
-
-	if cepUID := e.GetCiliumEndpointUID(); cepUID == "" {
-		scopedLog.Debug(
-			"updating CEP UID and syncing endpoint header file",
-			logfields.Node, types.GetName(),
-			logfields.CEPUIDOld, cepUID,
-			logfields.CEPUID, localCEP.UID,
-		)
-		e.SetCiliumEndpointUID(localCEP.UID)
-		e.SyncEndpointHeaderFile()
 	}
 	return nil
 }
 
-// DeleteK8sCiliumEndpointSync replaces the endpoint controller to remove the
-// CEP from Kubernetes once the endpoint is stopped / removed from the
-// Cilium agent.
-func (epSync *EndpointSynchronizer) DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint) {
-	controllerName := endpoint.EndpointSyncControllerName(e.ID)
+// implementation of endpointmanager.Subscriber
 
-	scopedLog := e.Logger(subsysEndpointSync).With(logfields.Controller, controllerName)
-
-	if !epSync.Clientset.IsEnabled() {
-		scopedLog.Debug("Not starting controller because k8s is disabled")
-		return
+// Handle endpoint update events directly
+func (epSync *endpointSynchronizer) EndpointCreated(e *endpoint.Endpoint) {
+	select {
+	case epSync.q <- e:
+	default:
+		// it's OK to drop this here; the periodic resync will catch it
 	}
-	ciliumClient := epSync.Clientset.CiliumV2()
+}
 
-	// The health endpoint doesn't really exist in k8s and updates to it caused
-	// arbitrary errors. Disable the controller for these endpoints.
-	if isHealthEP := e.HasLabels(pkgLabels.LabelHealth); isHealthEP {
-		scopedLog.Debug("Not starting unnecessary CEP controller for cilium-health endpoint")
-		return
+func (epSync *endpointSynchronizer) EndpointDeleted(e *endpoint.Endpoint, _ endpoint.DeleteConfig) {
+	select {
+	case epSync.q <- e:
+	default:
+		// we cannot drop delete events
+		go func() {
+			epSync.q <- e
+		}()
+	}
+}
+
+func (epSync *endpointSynchronizer) EndpointRestored(e *endpoint.Endpoint) {
+	select {
+	case epSync.q <- e:
+	default:
+		// it's OK to drop this here; the periodic resync will catch it
+	}
+}
+
+func (epSync *endpointSynchronizer) observeEPs(ctx context.Context, e *endpoint.Endpoint) error {
+	// initialize some one-off state.
+	if epSync.nodeName == "" {
+		ln, err := epSync.localNodeStore.Get(ctx)
+		if err != nil {
+			return err
+		}
+		epSync.nodeName = ln.Name
+	}
+	if epSync.epStore == nil {
+		epStore, err := epSync.CiliumEndpoint.Store(ctx)
+		if err != nil {
+			return err
+		}
+		epSync.epStore = epStore
 	}
 
-	// NOTE: The controller functions do NOT hold the endpoint locks
-	e.UpdateController(controllerName,
-		controller.ControllerParams{
-			Group: ciliumEndpointToK8sSyncControllerGroup,
-			StopFunc: func(ctx context.Context) error {
-				return deleteCEP(ctx, scopedLog, ciliumClient, e)
-			},
+	var (
+		scopedLog = e.Logger(subsysEndpointSync)
+		cepName   = e.GetK8sCEPName()
+	)
+
+	if cepName == "" {
+		scopedLog.Debug("Skipping CiliumEndpoint update because it has no k8s cep name")
+		return nil
+	}
+	scopedLog = scopedLog.With(logfields.CEPName, cepName)
+
+	// If the EP is going away, delete it
+	if !e.IsAlive() {
+		err := epSync.deleteCEP(ctx, scopedLog, e)
+		if err != nil {
+			scopedLog.Warn("Failed to delete CiliumEndpoint (will retry)", logfields.Error, err)
+			// Deletion failed! We *must* requeue, or we will leak CEPs
+			// This could block, since we're in the handler function. In that case,
+			// spawn a goroutine and continue
+			select {
+			case epSync.q <- e:
+			default:
+				go func() {
+					epSync.q <- e
+				}()
+			}
+		}
+		return nil
+	} else {
+		// Otherwise, make sure the CEP is updated.
+		err := epSync.doCiliumEndpointSync(ctx, e)
+		if err != nil {
+			scopedLog.Warn("CiliumEndpoint change failed (will retry)", logfields.Error, err)
+		}
+		// no need to explicitly requeue, this is an alive endpoint that will be re-synced
+		return nil
+	}
+}
+
+// doCiliumEndpointSync synchronizes the CiliumEndpoint object in the apiserver for this given endpoint.
+func (epSync *endpointSynchronizer) doCiliumEndpointSync(ctx context.Context, e *endpoint.Endpoint) error {
+	var (
+		scopedLog = e.Logger(subsysEndpointSync)
+		cepName   = e.GetK8sCEPName()
+		ns        = e.GetK8sNamespace()
+		owner     = e.GetCEPOwner()
+	)
+
+	if epSync.EM.LookupCEPName(ns+"/"+cepName) != e {
+		// This could happen if we somehow handled a pod delete after creation,
+		// but it really shouldn't happen.
+		scopedLog.Debug("BUG: two endpoints have the same CiliumEndpoint name")
+		return nil
+	}
+
+	if owner.IsNil() {
+		scopedLog.Debug("Skipping CiliumEndpoint update because it has no owner")
+		return nil
+	}
+
+	// Determine the existing CEP
+	// (This is from the local store, so it may have some delay)
+	existingSlimCEP, _, err := epSync.epStore.GetByKey(resource.Key{Namespace: ns, Name: cepName})
+	if err != nil {
+		// should not be reachable
+		return fmt.Errorf("BUG: CEP local lookup failed: %w", err)
+	}
+
+	if existingSlimCEP == nil && e.GetCiliumEndpointUID() != "" {
+		scopedLog.Warn("CEP was deleted externally or there is a significant delay on the CEP informer, will recreate")
+	}
+
+	// See if the desired CEP matches the existing SlimCEP.
+	//
+	// This is made more difficult by the fact that SlimCEP throws away some of the
+	// fields we set.
+	newCEP := makeCEP(e)
+	if canSkipWrite(newCEP, existingSlimCEP) {
+		// TODO: make this stochastic -- we should force an update randomly.
+		scopedLog.Debug("Skipping CEP update (unchanged)")
+		return nil
+	}
+
+	newCEP, err = epSync.ensureCEP(ctx, scopedLog, newCEP, existingSlimCEP == nil)
+	if err != nil {
+		return err
+	} else {
+		if e.SetCiliumEndpointUID(newCEP.UID) {
+			e.SyncEndpointHeaderFile()
+		}
+	}
+	return nil
+}
+
+func makeOwnerReferences(cepOwner endpoint.CEPOwnerInterface) meta_v1.OwnerReference {
+	return meta_v1.OwnerReference{
+		APIVersion: cepOwner.GetAPIVersion(),
+		Kind:       cepOwner.GetKind(),
+		Name:       cepOwner.GetName(),
+		UID:        cepOwner.GetUID(),
+	}
+}
+
+func makeCEP(e *endpoint.Endpoint) *cilium_v2.CiliumEndpoint {
+	cepOwner := e.GetCEPOwner()
+	cep := &cilium_v2.CiliumEndpoint{
+		ObjectMeta: meta_v1.ObjectMeta{
+			Namespace:       e.GetK8sNamespace(),
+			Name:            e.GetK8sCEPName(),
+			OwnerReferences: []meta_v1.OwnerReference{makeOwnerReferences(cepOwner)},
+			// Mirror the labels of parent pod in CiliumEndpoint object to enable
+			// label based selection for CiliumEndpoints.
+			Labels: cepOwner.GetLabels(),
 		},
+		Status: *e.GetCiliumEndpointStatus(),
+	}
+
+	return cep
+}
+
+func canSkipWrite(newCEP *cilium_v2.CiliumEndpoint, existingSlimCEP *k8sTypes.CiliumEndpoint) bool {
+	if existingSlimCEP != nil {
+		// check to see if they're unchanged
+		newSlimCEP, _ := k8s.TransformToCiliumEndpoint(newCEP)
+		return newSlimCEP.DeepEqual(existingSlimCEP)
+	}
+	return false
+}
+
+// ensureCEP will create or update the desired CiliumEndpoint. It handles
+// cases where the desired CEP does or does not exist unexpectedly.
+func (epSync *endpointSynchronizer) ensureCEP(ctx context.Context, log *slog.Logger, newCEP *cilium_v2.CiliumEndpoint, tryCreate bool) (res *cilium_v2.CiliumEndpoint, err error) {
+	if tryCreate {
+		res, err = epSync.createCEP(ctx, newCEP)
+		if err == nil {
+			log.Info("created CiliumEndpoint")
+			return
+		} else {
+			err = fmt.Errorf("failed to create CiliumEndpoint: %w", err)
+		}
+	} else {
+		res, err = epSync.updateCEP(ctx, newCEP)
+		if err == nil {
+			log.Info("updated CiliumEndpoint")
+			return
+		} else {
+			err = fmt.Errorf("failed to update CiliumEndpoint: %w", err)
+		}
+	}
+
+	if tryCreate && k8serrors.IsAlreadyExists(err) {
+		log.Info("CiliumEndpoint already exists, trying update")
+		return epSync.ensureCEP(ctx, log, newCEP, !tryCreate)
+	} else if !tryCreate && k8serrors.IsNotFound(err) {
+		log.Info("CiliumEndpoint unexpectedly missing, will try creation")
+		return epSync.ensureCEP(ctx, log, newCEP, !tryCreate)
+	}
+	return
+}
+
+// updateCEP updates the Status and Labels fields of a given CiliumEndpoint.
+//
+// This is done as a JSON patch with the condition that the owning resource matches
+// our understanding of the owner. This is to prevent us from editing the CEP
+// of a pod we don't own.
+// Note that we **do not** check the ResourceVersion, as that's not relevant. The
+// Status field is entirely owned by the agent.
+// If there is a CEP referencing a stale pod, it will be deleted by the
+// CEP GC loop in the operator.
+func (epSync *endpointSynchronizer) updateCEP(ctx context.Context, newCEP *cilium_v2.CiliumEndpoint) (*cilium_v2.CiliumEndpoint, error) {
+	patch := []k8s.JSONPatch{
+		// Condition this update on us having the same owner as the existing CEP
+		{
+			OP:    "test",
+			Path:  "/metadata/ownerReferences",
+			Value: newCEP.OwnerReferences,
+		},
+		{
+			OP:    "replace",
+			Path:  "/status",
+			Value: newCEP.Status,
+		},
+		{
+			OP:    "replace",
+			Path:  "/metadata/labels",
+			Value: newCEP.Labels,
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		// unreachable
+		return nil, err
+	}
+
+	return epSync.Clientset.CiliumV2().CiliumEndpoints(newCEP.Namespace).Patch(
+		ctx,
+		newCEP.Name,
+		k8stypes.JSONPatchType,
+		patchBytes,
+		meta_v1.PatchOptions{},
 	)
 }
 
-func deleteCEP(ctx context.Context, scopedLog *slog.Logger, ciliumClient v2.CiliumV2Interface, e *endpoint.Endpoint) error {
+func (epSync *endpointSynchronizer) createCEP(ctx context.Context, newCEP *cilium_v2.CiliumEndpoint) (*cilium_v2.CiliumEndpoint, error) {
+	return epSync.Clientset.CiliumV2().CiliumEndpoints(newCEP.Namespace).
+		Create(ctx, newCEP, meta_v1.CreateOptions{})
+}
+
+// deleteCEP deletes the CEP for the given endpoint.
+// It is careful not to delete CEPs that it does not own.
+// It does this by matching on UID if possible, and if that fails
+// or we didn't record the UID, it gets the CEP
+// from the apiserver and checks that we are still the owner.
+func (epSync *endpointSynchronizer) deleteCEP(ctx context.Context, log *slog.Logger, e *endpoint.Endpoint) error {
+	ns := e.GetK8sNamespace()
 	cepName := e.GetK8sCEPName()
-	if cepName == "" {
-		scopedLog.Debug("Skipping CiliumEndpoint deletion because it has no k8s cep name")
-		return nil
-	}
 
-	cepOwner := e.GetCEPOwner()
-	if cepOwner.IsNil() {
-		scopedLog.Debug("Skipping CiliumEndpoint deletion because owner is nil")
-		return nil
-	}
+	api := epSync.Clientset.CiliumV2().CiliumEndpoints(ns)
 
-	// A CEP should be only be deleted by the agent that manages the
-	// corresponding pod. However, it is possible for a pod to restart and be
-	// scheduled onto a different node while the agent on the original node was
-	// down, which would cause the CEP to be deleted once the original agent came
-	// back up. (This holds for StatefulSets in particular that come with stable
-	// pod identifiers and thus do not guard against such accidental deletes
-	// through unique pod names.) Storing the CEP UID at CEP create/fetch time
-	// and using it as a precondition for deletion ensures that agents may only
-	// delete CEPs they own.
-	// It is possible for the CEP UID to not be populated when an agent tries to
-	// clean up a CEP. In that case, skip deletion and rely on cilium operator
-	// garbage collection to clean up eventually.
-	cepUID := e.GetCiliumEndpointUID()
-	if cepUID == "" {
-		scopedLog.Debug("Skipping CiliumEndpoint deletion because it has no UID")
-		return nil
-	}
-
-	cep, err := ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Get(ctx, cepName, meta_v1.GetOptions{})
-	if err != nil {
-		if !k8serrors.IsNotFound(err) {
-			scopedLog.Warn("Unable to get CEP for deletion", logfields.Error, err)
+	// first attempt: delete with a UID precondition
+	uid := e.GetCiliumEndpointUID()
+	if uid != "" {
+		err := api.Delete(
+			ctx,
+			cepName,
+			*meta_v1.NewPreconditionDeleteOptions(string(uid)),
+		)
+		if err == nil || k8serrors.IsNotFound(err) {
+			return nil
 		}
+		// Delete did not fail due to a precondition. Nothing more to do
+		if !k8serrors.IsConflict(err) {
+			return err
+		}
+
+		// We failed a precondition, which means the CEP's UID doesn't match our understanding.
+		// Now we need to re-fetch and be careful
+		log.Warn("CEP deletion failed due to precondition. Will re-fetch and retry", logfields.Error, err)
+	}
+
+	owner := e.GetCEPOwner()
+	// now, either we have no UID or the precondition failed.
+	// Fetch the CEP directly from the API, then check that we still own the CEP.
+	existingCEP, err := api.Get(ctx, cepName, meta_v1.GetOptions{ResourceVersion: "0"})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	// If this CEP has a different owner, we should not touch it.
+	//
+	// We are allowed, however, to touch CEPs without an owner. This can happen if someone
+	// does `kubectl delete pod --cascade=orphan``, which removes OwnerReferences from
+	// any downstream resources directly in the apisever.
+	// Since we validate the node name below, this means it's still it's this agent's CEP
+	wantOwnerRef := makeOwnerReferences(owner)
+	if len(existingCEP.OwnerReferences) == 1 && existingCEP.OwnerReferences[0] != wantOwnerRef {
+		log.Info("Skipping CEP deletion as it has a different owner")
 		return nil
 	}
-	// A replacement endpoint can adopt the same CEP UID. Check the endpoint
-	// ID and, when available, the CNI attachment to account for local ID reuse.
-	identifiers := cep.Status.ExternalIdentifiers
-	if cep.UID != cepUID || cep.Status.ID != int64(e.ID) ||
-		(identifiers != nil && identifiers.CniAttachmentID != "" && identifiers.CniAttachmentID != e.GetCNIAttachmentID()) {
-		scopedLog.Debug("Skipping CiliumEndpoint deletion because it belongs to another endpoint")
+	// skip deletion if CEP has a different node. It means
+	// another agent has "taken over" this CEP
+	if existingCEP.Status.NodeName != "" && existingCEP.Status.NodeName != epSync.nodeName {
+		log.Info("Skipping CEP deletion as it has a different node")
 		return nil
 	}
 
-	scopedLog.Debug("deleting CEP with UID", logfields.CEPUID, cepUID)
-	if err := ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Delete(ctx, cepName, meta_v1.DeleteOptions{
-		// Reject an update or takeover between GET and DELETE.
-		Preconditions: &meta_v1.Preconditions{
-			UID:             &cepUID,
-			ResourceVersion: &cep.ResourceVersion,
-		},
-	}); err != nil {
-		if !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
-			scopedLog.Warn("Unable to delete CEP", logfields.Error, err)
-		}
+	// Delete the CEP, with a ResourceVersion precondition to protect against the CEP being changed.
+	err = api.Delete(ctx, cepName, *meta_v1.NewRVDeletionPrecondition(existingCEP.ResourceVersion))
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return err
 	}
 	return nil
 }
